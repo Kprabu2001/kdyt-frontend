@@ -35,9 +35,21 @@ export default function App() {
   const [playlistUrl, setPlaylistUrl] = useState(null);
   const [deferredPrompt, setDeferredPrompt] = useState(null);
   const [showPwaBanner, setShowPwaBanner]   = useState(false);
+  const [isIos, setIsIos]                   = useState(false);
 
-  // Capture the PWA install prompt
+  // Capture the PWA install prompt (Android/Chrome) or show iOS instructions
   useEffect(() => {
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    const isStandalone =
+      window.navigator.standalone === true ||
+      window.matchMedia("(display-mode: standalone)").matches;
+
+    if (ios && !isStandalone) {
+      setIsIos(true);
+      const timer = setTimeout(() => setShowPwaBanner(true), 3000);
+      return () => clearTimeout(timer);
+    }
+
     const handler = (e) => {
       e.preventDefault();
       setDeferredPrompt(e);
@@ -48,6 +60,10 @@ export default function App() {
   }, []);
 
   const handleInstall = async () => {
+    if (isIos) {
+      setShowPwaBanner(false);
+      return;
+    }
     if (!deferredPrompt) return;
     deferredPrompt.prompt();
     await deferredPrompt.userChoice;
@@ -128,9 +144,20 @@ export default function App() {
       {showPwaBanner && (
         <div className="pwa-banner">
           <div className="pwa-banner-text">
-            <strong>Install KDYT</strong> — add to your home screen for instant access.
+            {isIos ? (
+              <>
+                <strong>Install KDYT</strong> — tap <span className="pwa-share-icon">⎋</span> then{" "}
+                <strong>Add to Home Screen</strong>.
+              </>
+            ) : (
+              <>
+                <strong>Install KDYT</strong> — add to your home screen for instant access.
+              </>
+            )}
           </div>
-          <button className="pwa-install-btn" onClick={handleInstall}>Install</button>
+          {!isIos && (
+            <button className="pwa-install-btn" onClick={handleInstall}>Install</button>
+          )}
           <button className="pwa-dismiss-btn" onClick={() => setShowPwaBanner(false)} aria-label="Dismiss">✕</button>
         </div>
       )}

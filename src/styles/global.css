@@ -513,7 +513,7 @@
    /* ── PWA Install banner ──────────────────────── */
    .pwa-banner {
      position:      fixed;
-     bottom:        16px;
+     bottom:        calc(16px + env(safe-area-inset-bottom, 0px));
      left:          50%;
      transform:     translateX(-50%);
      z-index:       200;
@@ -536,6 +536,13 @@
      line-height: 1.4;
    }
    .pwa-banner-text strong { color: var(--orange); }
+   .pwa-share-icon {
+     display:     inline-block;
+     font-style:  normal;
+     font-size:   1rem;
+     line-height: 1;
+     vertical-align: middle;
+   }
    .pwa-install-btn {
      padding:       8px 16px;
      background:    var(--grad);
