@@ -64,7 +64,7 @@ export default function HowItWorks() {
   ];
 
   return (
-    <section className="how-section">
+    <section className="how-section" id="how-it-works">
       <p className="section-eyebrow">{t("how_eyebrow")}</p>
       <h2 className="section-title">{t("how_title")}</h2>
       <div className="how-steps-visual">

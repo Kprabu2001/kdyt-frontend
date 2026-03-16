@@ -19,7 +19,7 @@ export default function FeaturesGrid() {
   }));
 
   return (
-    <section className="features-section">
+    <section className="features-section" id="features">
       <div className="features-header">
         <p className="section-eyebrow">{t("feat_eyebrow")}</p>
         <h2 className="section-title">{t("feat_title")}</h2>

@@ -107,10 +107,24 @@ export default function Navbar() {
       </div>
 
       {mobileOpen && (
-        <div className="mobile-menu" onClick={() => setMobileOpen(false)}>
-          <a className="mobile-menu-item" href="#how">How it works</a>
-          <a className="mobile-menu-item" href="#features">Features</a>
-          <a className="mobile-menu-item" href="#faq">FAQ</a>
+        <div className="mobile-menu">
+          {[
+            { label: "How it works", id: "how-it-works" },
+            { label: "Features",     id: "features" },
+            { label: "FAQ",          id: "faq" },
+          ].map(({ label, id }) => (
+            <button
+              key={id}
+              className="mobile-menu-item"
+              onClick={() => {
+                setMobileOpen(false);
+                const el = document.getElementById(id);
+                if (el) el.scrollIntoView({ behavior: "smooth" });
+              }}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       )}
     </nav>
