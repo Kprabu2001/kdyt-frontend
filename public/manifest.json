@@ -1,0 +1,21 @@
+{
+    "name": "KDYT — Free YouTube Downloader",
+    "short_name": "KDYT",
+    "description": "Download YouTube videos as MP4 up to 4K or extract MP3 audio. Free, instant, no signup.",
+    "start_url": "/",
+    "display": "standalone",
+    "orientation": "portrait-primary",
+    "background_color": "#fafafa",
+    "theme_color": "#ff6b00",
+    "icons": [
+      {
+        "src": "/favicon.svg",
+        "sizes": "any",
+        "type": "image/svg+xml",
+        "purpose": "any maskable"
+      }
+    ],
+    "categories": ["utilities", "productivity"],
+    "lang": "en",
+    "dir": "ltr"
+  }
