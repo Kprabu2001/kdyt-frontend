@@ -1,183 +1,225 @@
 // src/components/PlaylistQueue.jsx
-// Shown when a youtube.com/playlist?list= URL is detected.
-// Fetches playlist info and shows a queue UI for batch downloads.
-
 import { useState, useEffect } from "react";
 import { useI18n } from "../i18n/index.jsx";
-import { fetchVideoInfo } from "../services/api.js";
+import { fetchPlaylistInfo, extractPlaylistId, getTunnelUrl, startJob, pollJob } from "../services/api.js";
 import Spinner from "./Spinner.jsx";
 import { IconDownload, IconMusic, IconVideo, IconCheck, IconX } from "./Icons.jsx";
+import { API_BASE } from "../constants/config";
 
 const FORMAT_OPTIONS = [
-  { value: "mp3-320", label: "MP3 320kbps", type: "audio" },
-  { value: "mp3-128", label: "MP3 128kbps", type: "audio" },
-  { value: "mp4-1080", label: "MP4 1080p",  type: "video" },
-  { value: "mp4-720",  label: "MP4 720p",   type: "video" },
-  { value: "mp4-480",  label: "MP4 480p",   type: "video" },
+  { value: "320kbps", label: "MP3 · 320kbps", type: "audio" },
+  { value: "192kbps", label: "MP3 · 192kbps", type: "audio" },
+  { value: "128kbps", label: "MP3 · 128kbps", type: "audio" },
+  { value: "video",   label: "MP4 · Best",     type: "video" },
 ];
 
-function StatusDot({ status }) {
-  if (status === "done")    return <span className="pl-status done"><IconCheck /></span>;
-  if (status === "error")   return <span className="pl-status error"><IconX /></span>;
-  if (status === "working") return <span className="pl-status working"><Spinner size={12} /></span>;
+function StatusBadge({ status, error }) {
+  if (status === "done")    return <span className="pl-status done"><IconCheck /> Done</span>;
+  if (status === "error")   return <span className="pl-status error"><IconX /> {error || "Failed"}</span>;
+  if (status === "working") return <span className="pl-status working"><Spinner size={12} /> Converting…</span>;
+  if (status === "waiting") return <span className="pl-status waiting">Queued</span>;
   return null;
 }
 
 export default function PlaylistQueue({ playlistUrl, onCancel }) {
   const { t } = useI18n();
-
-  const [items,     setItems]     = useState([]);   // { index, title, thumbnail, url, selected, status }
+  const [videos,    setVideos]    = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [error,     setError]     = useState("");
-  const [format,    setFormat]    = useState("mp4-1080");
-  const [queueing,  setQueueing]  = useState(false);
+  const [format,    setFormat]    = useState("320kbps");
+  const [running,   setRunning]   = useState(false);
+  const [statuses,  setStatuses]  = useState({});  // videoId → { status, error }
+  const [selectAll, setSelectAll] = useState(true);
+  const [selected,  setSelected]  = useState({});
 
-  // Fetch playlist info from backend
+  const listId = extractPlaylistId(playlistUrl);
+
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    fetchVideoInfo(playlistUrl)
+    if (!listId) { setError("Invalid playlist URL."); setLoading(false); return; }
+    fetchPlaylistInfo(listId)
       .then(data => {
-        if (cancelled) return;
-        // Backend should return { entries: [{title, thumbnail, url, ...}] } for playlists
-        const entries = data.entries || [];
-        setItems(entries.map((e, i) => ({
-          index:     i,
-          title:     e.title || `Video ${i + 1}`,
-          thumbnail: e.thumbnail || "",
-          url:       e.webpage_url || e.url || "",
-          selected:  true,
-          status:    "idle",
-        })));
-        setLoading(false);
+        setVideos(data.videos || []);
+        const sel = {};
+        (data.videos || []).forEach(v => { sel[v.video_id] = true; });
+        setSelected(sel);
       })
-      .catch(err => {
-        if (cancelled) return;
-        setError(err.message || "Failed to load playlist.");
-        setLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [playlistUrl]);
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [listId]);
 
-  const toggleItem = (i) =>
-    setItems(prev => prev.map((it, idx) => idx === i ? { ...it, selected: !it.selected } : it));
-
-  const selectAll   = () => setItems(prev => prev.map(it => ({ ...it, selected: true  })));
-  const deselectAll = () => setItems(prev => prev.map(it => ({ ...it, selected: false })));
-
-  const selectedCount = items.filter(it => it.selected).length;
-
-  const handleDownloadAll = async () => {
-    const selected = items.filter(it => it.selected);
-    if (!selected.length) return;
-    setQueueing(true);
-
-    for (const item of selected) {
-      setItems(prev => prev.map(it =>
-        it.index === item.index ? { ...it, status: "working" } : it
-      ));
-      try {
-        // Each video is downloaded individually via existing single-video flow
-        await fetchVideoInfo(item.url);
-        setItems(prev => prev.map(it =>
-          it.index === item.index ? { ...it, status: "done" } : it
-        ));
-      } catch {
-        setItems(prev => prev.map(it =>
-          it.index === item.index ? { ...it, status: "error" } : it
-        ));
-      }
-    }
-    setQueueing(false);
+  const toggleSelect = (id) => setSelected(p => ({ ...p, [id]: !p[id] }));
+  const toggleAll    = () => {
+    const next = !selectAll;
+    setSelectAll(next);
+    const sel = {};
+    videos.forEach(v => { sel[v.video_id] = next; });
+    setSelected(sel);
   };
 
-  const fmt = FORMAT_OPTIONS.find(f => f.value === format);
+  const setStatus = (id, status, err = "") =>
+    setStatuses(p => ({ ...p, [id]: { status, error: err } }));
+
+  const downloadOne = async (video, fmt) => {
+    const fmtOpt = FORMAT_OPTIONS.find(f => f.value === fmt);
+    if (!fmtOpt) return;
+    setStatus(video.video_id, "working");
+
+    try {
+      if (fmtOpt.type === "audio") {
+        // Start audio job
+        const jobId = await startJob(video.video_id, fmt, "audio");
+        // Poll
+        await new Promise((resolve, reject) => {
+          const iv = setInterval(async () => {
+            try {
+              const data = await pollJob(jobId);
+              if (data.status === "ready") {
+                clearInterval(iv);
+                // Download file
+                const res = await fetch(`${API_BASE}/api/jobs/${jobId}/file`);
+                if (!res.ok) { reject(new Error("Download failed")); return; }
+                const disposition = res.headers.get("Content-Disposition") || "";
+                const nameMatch   = disposition.match(/filename[^;=\n]*=["']?([^"'\n;]+)["']?/i);
+                const rawName     = nameMatch ? nameMatch[1].trim() : video.title;
+                const filename    = rawName.includes(".") ? rawName : `${rawName}.mp3`;
+                const blob = await res.blob();
+                const url  = URL.createObjectURL(blob);
+                const a    = document.createElement("a");
+                a.href = url; a.download = filename;
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(url), 10_000);
+                resolve();
+              } else if (data.status === "error") {
+                clearInterval(iv);
+                reject(new Error(data.error || "Conversion failed"));
+              }
+            } catch (e) { clearInterval(iv); reject(e); }
+          }, 2000);
+        });
+      } else {
+        // Video tunnel
+        const tunnel = await getTunnelUrl(video.video_id, "22", "video");
+        if (!tunnel.url) throw new Error("No download URL");
+        const a = document.createElement("a");
+        a.href = tunnel.url; a.download = `${video.title}.mp4`;
+        a.target = "_blank"; a.rel = "noopener noreferrer";
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      }
+      setStatus(video.video_id, "done");
+    } catch (e) {
+      setStatus(video.video_id, "error", e.message?.slice(0, 60));
+    }
+  };
+
+  const downloadAll = async () => {
+    setRunning(true);
+    const toDownload = videos.filter(v => selected[v.video_id]);
+    for (const video of toDownload) {
+      if (statuses[video.video_id]?.status === "done") continue;
+      await downloadOne(video, format);
+      await new Promise(r => setTimeout(r, 500)); // small delay between downloads
+    }
+    setRunning(false);
+  };
+
+  const selectedCount = Object.values(selected).filter(Boolean).length;
+  const doneCount     = Object.values(statuses).filter(s => s.status === "done").length;
 
   return (
-    <div className="pl-wrap">
-      {/* Header */}
+    <div className="pl-wrapper">
       <div className="pl-header">
         <div className="pl-header-left">
-          <div className="pl-badge">
-            {fmt?.type === "audio" ? <IconMusic /> : <IconVideo />}
-            {t("playlist_detected")}
-          </div>
-          {!loading && !error && (
-            <span className="pl-count">
-              {t("playlist_videos", { count: items.length })}
-            </span>
+          <h3 className="pl-title">Playlist · {videos.length} videos</h3>
+          {videos.length > 0 && (
+            <span className="pl-meta">{selectedCount} selected · {doneCount} done</span>
           )}
         </div>
-        <button className="pl-cancel" onClick={onCancel} aria-label="Cancel playlist">
-          <IconX />
-        </button>
+        <button className="pl-cancel" onClick={onCancel} aria-label="Cancel"><IconX /></button>
       </div>
 
-      {/* Loading */}
       {loading && (
-        <div className="pl-loading">
-          <Spinner size={22} /> Loading playlist…
-        </div>
+        <div className="pl-loading"><Spinner size={24} /> Loading playlist…</div>
       )}
 
-      {/* Error */}
-      {error && !loading && (
-        <div className="error-banner"><IconX /> {error}</div>
+      {error && (
+        <div className="pl-error"><IconX /> {error}</div>
       )}
 
-      {/* Controls */}
-      {!loading && !error && items.length > 0 && (
+      {!loading && !error && videos.length > 0 && (
         <>
+          {/* Format + controls */}
           <div className="pl-controls">
-            <div className="pl-select-btns">
-              <button className="pl-ctrl-btn" onClick={selectAll}>{t("playlist_select_all")}</button>
-              <button className="pl-ctrl-btn" onClick={deselectAll}>{t("playlist_deselect")}</button>
-            </div>
-            <div className="pl-format-wrap">
-              <label className="pl-format-label">{t("playlist_format")}</label>
-              <select
-                className="pl-format-select"
-                value={format}
-                onChange={e => setFormat(e.target.value)}
-              >
-                {FORMAT_OPTIONS.map(o => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
-            </div>
+            <select
+              className="pl-format-select"
+              value={format}
+              onChange={e => setFormat(e.target.value)}
+              disabled={running}
+            >
+              {FORMAT_OPTIONS.map(f => (
+                <option key={f.value} value={f.value}>{f.label}</option>
+              ))}
+            </select>
+            <button
+              className="pl-dl-all-btn"
+              onClick={downloadAll}
+              disabled={running || selectedCount === 0}
+            >
+              {running
+                ? <><Spinner size={14} /> Downloading…</>
+                : <><IconDownload /> Download {selectedCount}</>}
+            </button>
           </div>
 
-          {/* Item list */}
+          {/* Select all */}
+          <div className="pl-select-all">
+            <label className="pl-checkbox-label">
+              <input type="checkbox" checked={selectAll} onChange={toggleAll} />
+              Select all
+            </label>
+          </div>
+
+          {/* Video list */}
           <div className="pl-list">
-            {items.map((item, i) => (
-              <div
-                key={item.index}
-                className={`pl-item${item.selected ? " selected" : ""}${item.status === "done" ? " done" : ""}${item.status === "error" ? " errored" : ""}`}
-                onClick={() => item.status === "idle" && toggleItem(i)}
-              >
-                <div className={`pl-checkbox${item.selected ? " checked" : ""}`}>
-                  {item.selected && <IconCheck />}
+            {videos.map((v, i) => {
+              const st = statuses[v.video_id];
+              return (
+                <div key={v.video_id} className={`pl-item${selected[v.video_id] ? " selected" : ""}`}>
+                  <label className="pl-checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={!!selected[v.video_id]}
+                      onChange={() => toggleSelect(v.video_id)}
+                      disabled={running}
+                    />
+                  </label>
+                  <div className="pl-thumb-wrap">
+                    {v.thumbnail
+                      ? <img src={v.thumbnail} alt="" className="pl-thumb" loading="lazy" />
+                      : <div className="pl-thumb-placeholder" />}
+                    <span className="pl-index">{i + 1}</span>
+                  </div>
+                  <div className="pl-item-info">
+                    <div className="pl-item-title" title={v.title}>{v.title}</div>
+                    <div className="pl-item-meta">{v.channel}{v.duration ? ` · ${v.duration}` : ""}</div>
+                  </div>
+                  <div className="pl-item-status">
+                    {st ? (
+                      <StatusBadge status={st.status} error={st.error} />
+                    ) : (
+                      <button
+                        className="pl-item-dl-btn"
+                        onClick={() => downloadOne(v, format)}
+                        disabled={running}
+                        title="Download this video"
+                      >
+                        <IconDownload />
+                      </button>
+                    )}
+                  </div>
                 </div>
-                {item.thumbnail && (
-                  <img src={item.thumbnail} alt="" className="pl-thumb" loading="lazy" />
-                )}
-                <div className="pl-item-title">{item.title}</div>
-                <StatusDot status={item.status} />
-              </div>
-            ))}
+              );
+            })}
           </div>
-
-          {/* Download button */}
-          <button
-            className="pl-dl-btn"
-            onClick={handleDownloadAll}
-            disabled={queueing || selectedCount === 0}
-          >
-            {queueing
-              ? <><Spinner size={16} /> {t("playlist_queue")}…</>
-              : <><IconDownload /> {t("playlist_download_selected", { count: selectedCount })}</>
-            }
-          </button>
         </>
       )}
     </div>

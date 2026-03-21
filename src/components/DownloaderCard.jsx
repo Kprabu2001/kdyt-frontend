@@ -7,7 +7,7 @@ import { useI18n }                          from "../i18n/index.jsx";
 export default function DownloaderCard({
   url, loading, info, error, formatStates,
   inputRef,
-  onUrlChange, onKeyDown, onPaste, onClear, onFetch, onDownload,
+  onUrlChange, onKeyDown, onPaste, onClear, onFetch, onDownload, onTrigger,
   onOpenTerms,
 }) {
   const { t } = useI18n();
@@ -41,6 +41,7 @@ export default function DownloaderCard({
         formatStates={formatStates}
         error={error}
         onDownload={onDownload}
+        onTrigger={onTrigger}
       />
     </div>
   );

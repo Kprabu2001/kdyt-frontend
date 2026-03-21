@@ -1,14 +1,13 @@
 // src/components/VideoResult.jsx
-
 import { useState } from "react";
-import DownloadModal         from "./DownloadModal";
-import Spinner               from "./Spinner";
+import DownloadModal from "./DownloadModal";
+import Spinner       from "./Spinner";
 import { IconCheck, IconDownload, IconMusic, IconVideo } from "./Icons";
-import { useI18n }           from "../i18n/index.jsx";
+import { useI18n }   from "../i18n/index.jsx";
 
 function DownloadRow({ label, size, type, state, onClick, t }) {
   const phase  = state?.phase || "idle";
-  const isBusy = phase === "preparing" || phase === "downloading";
+  const isBusy = ["resolving","preparing","downloading"].includes(phase);
   const isDone = phase === "done";
 
   return (
@@ -25,7 +24,7 @@ function DownloadRow({ label, size, type, state, onClick, t }) {
         onClick={e => { e.stopPropagation(); onClick(); }}
       >
         {isBusy ? <><Spinner size={13} /> {t("working")}</> :
-         isDone  ? <><IconCheck /> {t("done")}</>           :
+         isDone  ? <><IconCheck /> {t("done")}</> :
                    <><IconDownload /> {t("download")}</>}
       </button>
     </div>
@@ -55,22 +54,25 @@ export function VideoResultSkeleton() {
   );
 }
 
-export default function VideoResult({ info, formatStates, onDownload, error }) {
-  const { t }               = useI18n();
-  const [modal, setModal]   = useState(null);
+export default function VideoResult({ info, formatStates, onDownload, onTrigger, error }) {
+  const { t }             = useI18n();
+  const [modal, setModal] = useState(null);
 
   if (!info) return null;
 
   const openModal = (formatId, label, type) => {
     setModal({ formatId, label, type });
-    onDownload(formatId, type);
+    const existing = formatStates[formatId];
+    if (!existing || existing.phase === "idle" || existing.phase === "error") {
+      onDownload(formatId, type);
+    }
   };
 
   const closeModal = () => setModal(null);
 
   const activeState     = modal ? (formatStates[modal.formatId] || {}) : {};
   const phase           = activeState.phase || "idle";
-  const handleDownloadNow = () => { if (modal) onDownload(modal.formatId, modal.type); };
+  const handleDownloadNow = () => { if (modal) onTrigger(modal.formatId, modal.type); };
 
   return (
     <>

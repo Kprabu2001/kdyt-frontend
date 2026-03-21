@@ -1,82 +1,85 @@
 // src/App.jsx
-
 import { useState, useEffect } from "react";
-import Navbar          from "./components/Navbar";
-import DownloaderCard  from "./components/DownloaderCard";
-import StatsBar        from "./components/StatsBar";
-import HowItWorks      from "./components/HowItWorks";
-import FeaturesGrid    from "./components/FeaturesGrid";
-import Faq             from "./components/Faq";
-import Footer          from "./components/Footer";
-import TermsOfService  from "./components/Termsofservice";
-import PlaylistQueue   from "./components/PlaylistQueue";
+import Navbar         from "./components/Navbar";
+import DownloaderCard from "./components/DownloaderCard";
+import StatsBar       from "./components/StatsBar";
+import HowItWorks     from "./components/HowItWorks";
+import FeaturesGrid   from "./components/FeaturesGrid";
+import Faq            from "./components/Faq";
+import Footer         from "./components/Footer";
+import TermsOfService from "./components/Termsofservice";
+import PlaylistQueue  from "./components/PlaylistQueue";
 import { useDownloader } from "./hooks/useDownloader";
 import { useI18n }       from "./i18n/index.jsx";
+import { extractVideoId, extractPlaylistId, isPlaylistUrl } from "./services/api";
 import "./styles/global.css";
 import "./styles/components.css";
 import "./styles/sections.css";
-
-function isPlaylistUrl(url) {
-  try {
-    const u = new URL(url);
-    return (
-      u.hostname.includes("youtube.com") &&
-      u.searchParams.has("list") &&
-      (u.pathname === "/playlist" || u.searchParams.has("list"))
-    );
-  } catch { return false; }
-}
 
 export default function App() {
   const { t } = useI18n();
   const dl = useDownloader({});
 
-  const [showTerms, setShowTerms]     = useState(false);
-  const [playlistUrl, setPlaylistUrl] = useState(null);
+  const [showTerms,     setShowTerms]     = useState(false);
+  const [playlistId,    setPlaylistId]    = useState(null);
+  const [playlistUrl,   setPlaylistUrl]   = useState(null);
   const [deferredPrompt, setDeferredPrompt] = useState(null);
-  const [showPwaBanner, setShowPwaBanner]   = useState(false);
-  const [isIos, setIsIos]                   = useState(false);
+  const [showPwaBanner,  setShowPwaBanner]  = useState(false);
+  const [isIos,          setIsIos]          = useState(false);
 
-  // Capture the PWA install prompt (Android/Chrome) or show iOS instructions
   useEffect(() => {
     const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
     const isStandalone =
       window.navigator.standalone === true ||
       window.matchMedia("(display-mode: standalone)").matches;
-
     if (ios && !isStandalone) {
       setIsIos(true);
       const timer = setTimeout(() => setShowPwaBanner(true), 3000);
       return () => clearTimeout(timer);
     }
-
     const handler = (e) => {
-      e.preventDefault();
-      setDeferredPrompt(e);
-      setShowPwaBanner(true);
+      e.preventDefault(); setDeferredPrompt(e); setShowPwaBanner(true);
     };
     window.addEventListener("beforeinstallprompt", handler);
     return () => window.removeEventListener("beforeinstallprompt", handler);
   }, []);
 
   const handleInstall = async () => {
-    if (isIos) {
-      setShowPwaBanner(false);
-      return;
-    }
+    if (isIos) { setShowPwaBanner(false); return; }
     if (!deferredPrompt) return;
     deferredPrompt.prompt();
     await deferredPrompt.userChoice;
-    setDeferredPrompt(null);
-    setShowPwaBanner(false);
+    setDeferredPrompt(null); setShowPwaBanner(false);
   };
 
   const handleFetch = () => {
-    if (isPlaylistUrl(dl.url)) {
-      setPlaylistUrl(dl.url);
-    } else {
-      dl.fetchInfo();
+    const raw = dl.url.trim();
+    if (!raw) { dl.fetchInfo(); return; }
+
+    // Playlist URL
+    if (isPlaylistUrl(raw)) {
+      const pid = extractPlaylistId(raw);
+      if (pid) {
+        setPlaylistId(pid);
+        setPlaylistUrl(raw);
+        return;
+      }
     }
+
+    // Shorts or regular video — extract ID and fetch
+    const vid = extractVideoId(raw);
+    if (vid) {
+      dl.changeUrl(vid);           // strip to ID in input like Y2Mate
+      setTimeout(() => dl.fetchInfo(), 0);
+    } else {
+      dl.fetchInfo();              // let backend validate
+    }
+  };
+
+  const handleCancelPlaylist = () => {
+    setPlaylistId(null);
+    setPlaylistUrl(null);
+    dl.clearAll();
   };
 
   return (
@@ -97,11 +100,11 @@ export default function App() {
 
           <p className="subline">{t("subline")}</p>
 
-          {playlistUrl ? (
+          {playlistId ? (
             <div className="input-card" style={{ width: "100%", maxWidth: "740px" }}>
               <PlaylistQueue
                 playlistUrl={playlistUrl}
-                onCancel={() => setPlaylistUrl(null)}
+                onCancel={handleCancelPlaylist}
               />
             </div>
           ) : (
@@ -118,6 +121,7 @@ export default function App() {
               onClear={dl.clearAll}
               onFetch={handleFetch}
               onDownload={dl.handleDownload}
+              onTrigger={dl.triggerDownload}
               onOpenTerms={() => setShowTerms(true)}
             />
           )}
@@ -140,24 +144,16 @@ export default function App() {
       <Footer />
       {showTerms && <TermsOfService onClose={() => setShowTerms(false)} />}
 
-      {/* PWA install banner */}
       {showPwaBanner && (
         <div className="pwa-banner">
           <div className="pwa-banner-text">
             {isIos ? (
-              <>
-                <strong>Install KDYT</strong> — tap <span className="pwa-share-icon">⎋</span> then{" "}
-                <strong>Add to Home Screen</strong>.
-              </>
+              <><strong>Install KDYT</strong> — tap <span className="pwa-share-icon">⎋</span> then <strong>Add to Home Screen</strong>.</>
             ) : (
-              <>
-                <strong>Install KDYT</strong> — add to your home screen for instant access.
-              </>
+              <><strong>Install KDYT</strong> — add to your home screen for instant access.</>
             )}
           </div>
-          {!isIos && (
-            <button className="pwa-install-btn" onClick={handleInstall}>Install</button>
-          )}
+          {!isIos && <button className="pwa-install-btn" onClick={handleInstall}>Install</button>}
           <button className="pwa-dismiss-btn" onClick={() => setShowPwaBanner(false)} aria-label="Dismiss">✕</button>
         </div>
       )}

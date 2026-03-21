@@ -1,7 +1,12 @@
 // src/hooks/useDownloader.js
+// Exact Y2Mate flow:
+//   1. User pastes full URL (or bare video ID)
+//   2. On Fetch → extract video ID → call /api/info?video_id=...
+//   3. Video download → /api/tunnel?video_id=...&format_id=... → CDN URL → browser downloads
+//   4. Audio download → /api/jobs?video_id=... → poll → stream MP3
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { fetchVideoInfo, startJob, pollJob } from "../services/api";
+import { extractVideoId, fetchVideoInfo, getTunnelUrl, startJob, pollJob } from "../services/api";
 import { API_BASE } from "../constants/config";
 
 const YOUTUBE_HOSTS = new Set([
@@ -9,22 +14,30 @@ const YOUTUBE_HOSTS = new Set([
   "youtube-nocookie.com", "www.youtube-nocookie.com",
 ]);
 
-function isValidYouTubeUrl(url) {
+function isValidInput(input) {
+  if (!input) return false;
+  // Bare 11-char video ID
+  if (/^[0-9A-Za-z_-]{11}$/.test(input.trim())) return true;
   try {
-    const u = new URL(url);
-    if (!YOUTUBE_HOSTS.has(u.hostname)) return false;
-    // Regular watch, Shorts, embeds, youtu.be all valid
-    return (
-      u.pathname.startsWith("/watch") ||
-      u.pathname.startsWith("/shorts/") ||
-      u.pathname.startsWith("/embed/") ||
-      u.hostname === "youtu.be"
-    );
+    const u = new URL(input);
+    return YOUTUBE_HOSTS.has(u.hostname);
   } catch { return false; }
+}
+
+function triggerDirectDownload(url, filename, ext) {
+  const a  = document.createElement("a");
+  a.href   = url;
+  a.download = filename ? `${filename}.${ext}` : `download.${ext}`;
+  a.target = "_blank";
+  a.rel    = "noopener noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 export function useDownloader({ onDownloaded } = {}) {
   const [url,          setUrl]          = useState("");
+  const [videoId,      setVideoId]      = useState(null);   // extracted ID
   const [loading,      setLoading]      = useState(false);
   const [info,         setInfo]         = useState(null);
   const [error,        setError]        = useState("");
@@ -32,15 +45,12 @@ export function useDownloader({ onDownloaded } = {}) {
 
   const inputRef  = useRef(null);
   const pollRef   = useRef({});
-  const abortRef  = useRef({});
   const jobIdRef  = useRef({});
   const infoRef   = useRef(null);
+  const videoIdRef = useRef(null);   // always up-to-date video ID
 
   useEffect(() => { inputRef.current?.focus(); }, []);
-  useEffect(() => () => {
-    Object.values(pollRef.current).forEach(clearInterval);
-    Object.values(abortRef.current).forEach(c => c?.abort());
-  }, []);
+  useEffect(() => () => { Object.values(pollRef.current).forEach(clearInterval); }, []);
 
   const _setFormat = useCallback((formatId, patch) => {
     setFormatStates(prev => ({
@@ -49,13 +59,12 @@ export function useDownloader({ onDownloaded } = {}) {
     }));
   }, []);
 
-  const _startFileDownload = useCallback((formatId, jobId, type) => {
+  // ── Audio: stream finished job file ──────────────────────────────
+  const _downloadAudioFile = useCallback((formatId) => {
     _setFormat(formatId, { phase: "downloading", dlProgress: 0, indeterminate: true });
+    const { jobId } = jobIdRef.current[formatId] || {};
+    if (!jobId) return;
 
-    // Stream via fetch so we stay same-origin and get real download behaviour.
-    // We use a streaming approach: pipe ReadableStream → StreamSaver or Blob.
-    // For simplicity and reliability: fetch → collect → Blob → save.
-    // This works cross-origin and gives us the filename from Content-Disposition.
     (async () => {
       try {
         const res = await fetch(`${API_BASE}/api/jobs/${jobId}/file`);
@@ -63,157 +72,178 @@ export function useDownloader({ onDownloaded } = {}) {
           const d = await res.json().catch(() => ({}));
           throw new Error(d.detail || "Download failed.");
         }
-
         const contentLength = Number(res.headers.get("Content-Length")) || null;
         const disposition   = res.headers.get("Content-Disposition") || "";
         const nameMatch     = disposition.match(/filename[^;=]*=["']?([^";]+)["']?/i);
-        const mimeType      = res.headers.get("Content-Type") || "application/octet-stream";
-        const mimeExt       = mimeType.includes("mp3") || mimeType.includes("mpeg") ? "mp3" : "mp4";
-        const rawName       = nameMatch ? nameMatch[1].trim() : "download";
-        const filename      = rawName.includes(".") ? rawName : `${rawName}.${mimeExt}`;
+        const rawName       = nameMatch ? nameMatch[1].trim() : "audio";
+        const filename      = rawName.includes(".") ? rawName : `${rawName}.mp3`;
 
         const reader = res.body.getReader();
         const chunks = [];
-        let received  = 0;
-
+        let received = 0;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           chunks.push(value);
           received += value.length;
-          if (contentLength) {
+          if (contentLength)
             _setFormat(formatId, {
               indeterminate: false,
               dlProgress: Math.min(99, Math.round((received / contentLength) * 100)),
             });
-          }
         }
-
-        const blob    = new Blob(chunks, { type: mimeType });
+        const blob    = new Blob(chunks, { type: "audio/mpeg" });
         const blobUrl = URL.createObjectURL(blob);
-        const a       = document.createElement("a");
-        a.href        = blobUrl;
-        a.download    = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        const a = document.createElement("a");
+        a.href = blobUrl; a.download = filename;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(blobUrl), 30_000);
 
         _setFormat(formatId, { phase: "done", dlProgress: 100, indeterminate: false });
         delete jobIdRef.current[formatId];
-        // Notify history — wrapped so any failure never affects the user
-        try {
-          if (onDownloaded && infoRef.current) {
-            onDownloaded(infoRef.current, formatId, type);
-          }
-        } catch (_) {}
-
+        try { if (onDownloaded && infoRef.current) onDownloaded(infoRef.current, formatId, "audio"); } catch (_) {}
       } catch (err) {
-        if (err.name === "AbortError") return;
-        // Only show error if download hadn't completed yet
-        const currentPhase = formatStates[formatId]?.phase;
-        if (currentPhase !== "done") {
-          _setFormat(formatId, { phase: "error" });
-          setError(err.message || "Download failed.");
-        }
+        _setFormat(formatId, { phase: "error" });
+        setError(err.message || "Download failed.");
       }
     })();
-  }, [_setFormat]);
+  }, [_setFormat, onDownloaded]);
 
-  const changeUrl = useCallback((v) => { setUrl(v); setError(""); }, []);
-
-  const pasteFromClipboard = useCallback(async () => {
-    try { changeUrl(await navigator.clipboard.readText()); }
-    catch { inputRef.current?.focus(); }
-  }, [changeUrl]);
-
-  const clearAll = useCallback(() => {
-    Object.values(pollRef.current).forEach(clearInterval);
-    Object.values(abortRef.current).forEach(c => c?.abort());
-    pollRef.current  = {};
-    abortRef.current = {};
-    jobIdRef.current = {};
-    setUrl(""); setInfo(null); setError(""); setFormatStates({});
-    inputRef.current?.focus();
-  }, []);
-
-  const fetchInfo = useCallback(async () => {
-    if (!url.trim())             { setError("Please paste a YouTube URL."); return; }
-    if (!isValidYouTubeUrl(url)) { setError("Only YouTube URLs are supported (videos, Shorts, playlists)."); return; }
-    setLoading(true); setInfo(null); setError(""); setFormatStates({});
-    try {
-      const result = await fetchVideoInfo(url);
-      setInfo(result);
-      infoRef.current = result;
-    }
-    catch (e) { setError(e.message || "Something went wrong."); }
-    finally { setLoading(false); }
-  }, [url]);
-
-  const handleDownload = useCallback(async (formatId, type) => {
-    const existing = formatStates[formatId];
-
-    // If ready → user clicked Download Now → start actual file download
-    if (existing?.phase === "ready" && jobIdRef.current[formatId]) {
-      const { jobId: savedJobId, type: savedType } = jobIdRef.current[formatId];
-      _startFileDownload(formatId, savedJobId, savedType);
-      return;
-    }
-    // Already in progress or done — reopen modal only, no new job
-    if (existing?.phase === "preparing" || existing?.phase === "downloading" || existing?.phase === "done") return;
-
-    // Cancel any existing poll for this format
-    if (pollRef.current[formatId])  clearInterval(pollRef.current[formatId]);
-    if (abortRef.current[formatId]) abortRef.current[formatId].abort();
-
-    _setFormat(formatId, { phase: "preparing", prepProgress: 5, dlProgress: 0 });
+  // ── Audio: create job + poll ──────────────────────────────────────
+  const _startAudioJob = useCallback(async (formatId) => {
+    if (pollRef.current[formatId]) clearInterval(pollRef.current[formatId]);
+    _setFormat(formatId, { phase: "preparing", prepProgress: 5 });
     setError("");
 
-    // Start job
+    const vid = videoIdRef.current;
+    if (!vid) { _setFormat(formatId, { phase: "error" }); setError("No video loaded."); return; }
+
     let jobId;
     try {
-      jobId = await startJob(url, formatId, type);
-      jobIdRef.current[formatId] = { jobId, type };
+      jobId = await startJob(vid, formatId, "audio");
+      jobIdRef.current[formatId] = { jobId };
     } catch (e) {
       _setFormat(formatId, { phase: "error" });
       setError(e.message);
       return;
     }
 
-    // Poll until ready, then wait for user to click Download
     pollRef.current[formatId] = setInterval(async () => {
       try {
         const data = await pollJob(jobId);
         _setFormat(formatId, { prepProgress: data.progress ?? 0 });
-
         if (data.status === "ready") {
           clearInterval(pollRef.current[formatId]);
           delete pollRef.current[formatId];
-          // Stop here — wait for user to click Download button in modal
           _setFormat(formatId, { phase: "ready", prepProgress: 100 });
-
         } else if (data.status === "error") {
           clearInterval(pollRef.current[formatId]);
           delete pollRef.current[formatId];
           _setFormat(formatId, { phase: "error" });
-          setError(data.error || "Preparation failed.");
+          setError(data.error || "Conversion failed.");
         }
       } catch {
         clearInterval(pollRef.current[formatId]);
         _setFormat(formatId, { phase: "error" });
         setError("Lost connection to server.");
       }
-    }, 800);
-  }, [url, formatStates, _setFormat, _startFileDownload]);
+    }, 2000);
+  }, [_setFormat]);
 
-  const handleKeyDown = useCallback((e) => {
-    if (e.key === "Enter") fetchInfo();
-  }, [fetchInfo]);
+  // ── Main download handler ─────────────────────────────────────────
+  const handleDownload = useCallback(async (formatId, type) => {
+    const existing = formatStates[formatId];
+
+    if (type === "audio" && existing?.phase === "ready") {
+      _downloadAudioFile(formatId);
+      return;
+    }
+    if (["resolving","preparing","downloading","done"].includes(existing?.phase)) return;
+    if (pollRef.current[formatId]) clearInterval(pollRef.current[formatId]);
+    setError("");
+
+    const vid = videoIdRef.current;
+    if (!vid) { setError("No video loaded."); return; }
+
+    // ── VIDEO: tunnel → direct CDN ───────────────────────────────
+    if (type === "video") {
+      _setFormat(formatId, { phase: "resolving" });
+      try {
+        const tunnel = await getTunnelUrl(vid, formatId, "video");
+        if (tunnel.type === "direct" || tunnel.type === "split") {
+          _setFormat(formatId, { phase: "downloading", indeterminate: true });
+          triggerDirectDownload(tunnel.url, tunnel.filename, "mp4");
+          setTimeout(() => {
+            _setFormat(formatId, { phase: "done" });
+            try { if (onDownloaded && infoRef.current) onDownloaded(infoRef.current, formatId, "video"); } catch (_) {}
+          }, 1500);
+        }
+      } catch (e) {
+        _setFormat(formatId, { phase: "error" });
+        setError(e.message || "Failed to resolve download link.");
+      }
+      return;
+    }
+
+    // ── AUDIO: job system ─────────────────────────────────────────
+    await _startAudioJob(formatId);
+  }, [formatStates, _setFormat, _startAudioJob, _downloadAudioFile, onDownloaded]);
+
+  const changeUrl = useCallback((v) => {
+    setUrl(v);
+    setError("");
+    // Extract and store video ID as user types
+    const vid = extractVideoId(v.trim());
+    setVideoId(vid);
+    videoIdRef.current = vid;
+  }, []);
+
+  const pasteFromClipboard = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      changeUrl(text);
+    } catch { inputRef.current?.focus(); }
+  }, [changeUrl]);
+
+  const clearAll = useCallback(() => {
+    Object.values(pollRef.current).forEach(clearInterval);
+    pollRef.current  = {};
+    jobIdRef.current = {};
+    videoIdRef.current = null;
+    setUrl(""); setVideoId(null); setInfo(null); setError(""); setFormatStates({});
+    inputRef.current?.focus();
+  }, []);
+
+  const fetchInfo = useCallback(async () => {
+    const trimmed = url.trim();
+    if (!trimmed) { setError("Please paste a YouTube URL."); return; }
+    if (!isValidInput(trimmed)) { setError("Only YouTube URLs are supported."); return; }
+
+    const vid = extractVideoId(trimmed);
+    if (!vid) { setError("Could not extract video ID from that URL."); return; }
+
+    // Update video ID state
+    setVideoId(vid);
+    videoIdRef.current = vid;
+
+    setLoading(true); setInfo(null); setError(""); setFormatStates({});
+    try {
+      const result = await fetchVideoInfo(vid);   // send video_id only
+      setInfo(result);
+      infoRef.current = result;
+    } catch (e) {
+      setError(e.message || "Something went wrong.");
+    } finally {
+      setLoading(false);
+    }
+  }, [url]);
+
+  const handleKeyDown   = useCallback((e) => { if (e.key === "Enter") fetchInfo(); }, [fetchInfo]);
+  const triggerDownload = handleDownload;
 
   return {
-    url, loading, info, error, formatStates,
-    inputRef,
+    url, loading, info, error, formatStates, videoId, inputRef,
     changeUrl, pasteFromClipboard, clearAll,
-    fetchInfo, handleDownload, handleKeyDown,
+    fetchInfo, handleDownload, triggerDownload, handleKeyDown,
   };
 }
