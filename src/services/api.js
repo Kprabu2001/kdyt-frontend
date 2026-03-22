@@ -37,6 +37,12 @@ export function extractPlaylistId(url) {
   return match ? match[1] : null;
 }
 
+// ── Check if URL is a YouTube playlist ───────────────────────────
+export function isPlaylistUrl(url) {
+  if (!url) return false;
+  return extractPlaylistId(url) !== null;
+}
+
 // ── Fetch playlist info ───────────────────────────────────────────
 export async function fetchPlaylistInfo(playlistId) {
   let res;
