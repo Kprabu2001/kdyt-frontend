@@ -14,13 +14,46 @@ export function extractVideoId(url) {
     /youtu\.be\/([0-9A-Za-z_-]{11})/,
     /shorts\/([0-9A-Za-z_-]{11})/,
     /embed\/([0-9A-Za-z_-]{11})/,
-    /^([0-9A-Za-z_-]{11})$/,   // bare ID pasted directly
+    /^([0-9A-Za-z_-]{11})$/,
   ];
   for (const p of patterns) {
     const m = url.match(p);
     if (m) return m[1];
   }
   return null;
+}
+
+// ── Extract playlist ID from any YouTube URL ──────────────────────
+export function extractPlaylistId(url) {
+  if (!url) return null;
+  try {
+    const urlObj = new URL(url);
+    const list = urlObj.searchParams.get("list");
+    if (list) return list;
+  } catch {
+    // not a full URL, try regex
+  }
+  const match = url.match(/[?&]list=([^&]+)/);
+  return match ? match[1] : null;
+}
+
+// ── Fetch playlist info ───────────────────────────────────────────
+export async function fetchPlaylistInfo(playlistId) {
+  let res;
+  try {
+    res = await fetch(`${API_BASE}/api/playlist?playlist_id=${encodeURIComponent(playlistId)}`);
+  } catch {
+    throw new Error("Cannot reach the server. Make sure the backend is running.");
+  }
+  const data = await res.json();
+  if (!res.ok) {
+    if (res.status === 429) {
+      const m = Math.ceil((Number(res.headers.get("Retry-After")) || 900) / 60);
+      throw new Error(`Too many requests. Please wait ${m} minute${m !== 1 ? "s" : ""}.`);
+    }
+    throw new Error(data.detail || "Failed to fetch playlist info.");
+  }
+  return data;
 }
 
 // ── Info: send only video_id ──────────────────────────────────────
